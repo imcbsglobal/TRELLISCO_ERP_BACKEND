@@ -3,7 +3,7 @@ import logging
 from django.core.cache import cache
 from django.utils import timezone
 
-from .models import Announcement, Post
+from .models import Announcement, Post, PromoVideo
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,15 @@ def sync_announcements(now=None):
     return Announcement.objects.live(now).exclude(pk=current.pk).update(is_active=False)
 
 
+def sync_promo_videos(now=None):
+    """Same rule as announcements: only one promo video is ever live."""
+    now = now or timezone.now()
+    current = PromoVideo.current(now)
+    if current is None:
+        return 0
+    return PromoVideo.objects.live(now).exclude(pk=current.pk).update(is_active=False)
+
+
 def run_due_actions(now=None):
     """
     Runs both jobs. Expiry goes first so a post that is already past its
@@ -76,6 +85,10 @@ def run_due_actions(now=None):
         sync_announcements(now)
     except Exception:
         logger.exception('Could not sync announcements')
+    try:
+        sync_promo_videos(now)
+    except Exception:
+        logger.exception('Could not sync promo videos')
     return published, expired
 
 

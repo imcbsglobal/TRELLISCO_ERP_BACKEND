@@ -1,3 +1,4 @@
+from django.core.validators import FileExtensionValidator
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -224,3 +225,75 @@ class Announcement(models.Model):
         # for later leaves the current one alone until its time comes.
         if self.status == 'live':
             Announcement.objects.live().exclude(pk=self.pk).update(is_active=False)
+
+
+class PromoVideoQuerySet(models.QuerySet):
+    def live(self, now=None):
+        """Switched on AND inside its show/hide window right now."""
+        now = now or timezone.now()
+        return (
+            self.filter(is_active=True)
+            .filter(Q(publish_at__isnull=True) | Q(publish_at__lte=now))
+            .filter(Q(delete_at__isnull=True) | Q(delete_at__gt=now))
+        )
+
+
+class PromoVideo(models.Model):
+    """
+    Floating video card shown at the bottom-right of the public homepage.
+    Only one promo video is live at a time. Same scheduling rules as
+    Announcement: publish_at = when it appears, delete_at = when it is
+    automatically taken down (stays in the admin as "expired").
+    """
+
+    video = models.FileField(
+        upload_to='blog/promo/',
+        validators=[FileExtensionValidator(['mp4', 'webm', 'mov', 'm4v'])],
+    )
+    title = models.CharField(max_length=80, blank=True)
+    subtitle = models.CharField(max_length=80, blank=True)
+    button_label = models.CharField(max_length=40, blank=True, default='Book a Demo')
+    button_url = models.CharField(
+        max_length=500, blank=True,
+        help_text='Full URL (https://...) or a site path (/contact).',
+    )
+    is_active = models.BooleanField(default=False)
+
+    publish_at = models.DateTimeField(blank=True, null=True)
+    delete_at = models.DateTimeField(blank=True, null=True, db_index=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    objects = PromoVideoQuerySet.as_manager()
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return self.title or f'Promo video #{self.pk}'
+
+    @property
+    def status(self):
+        """hidden | scheduled | live | expired — computed, so it is always current."""
+        now = timezone.now()
+        if not self.is_active:
+            return 'hidden'
+        if self.delete_at and self.delete_at <= now:
+            return 'expired'
+        if self.publish_at and self.publish_at > now:
+            return 'scheduled'
+        return 'live'
+
+    @classmethod
+    def current(cls, now=None):
+        """The one promo visitors should see right now (or None)."""
+        live = list(cls.objects.live(now))
+        if not live:
+            return None
+        return max(live, key=lambda p: (p.publish_at or p.created_at, p.pk))
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.status == 'live':
+            PromoVideo.objects.live().exclude(pk=self.pk).update(is_active=False)

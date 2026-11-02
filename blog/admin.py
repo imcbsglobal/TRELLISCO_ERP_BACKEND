@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Announcement, Post
+from .models import Announcement, Post, PromoVideo
 
 
 @admin.register(Post)
@@ -15,3 +15,10 @@ class AnnouncementAdmin(admin.ModelAdmin):
     list_display = ('message', 'link_label', 'is_active', 'updated_at')
     list_filter = ('is_active',)
     search_fields = ('message', 'link_label')
+
+
+@admin.register(PromoVideo)
+class PromoVideoAdmin(admin.ModelAdmin):
+    list_display = ('title', 'button_label', 'is_active', 'publish_at', 'delete_at', 'updated_at')
+    list_filter = ('is_active',)
+    search_fields = ('title', 'subtitle', 'button_label')

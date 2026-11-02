@@ -1,7 +1,46 @@
+import json
+
 from django.core.validators import URLValidator
 from django.utils import timezone
 from rest_framework import serializers
-from .models import Announcement, Post
+from .models import Announcement, Post, PromoVideo
+
+
+class JSONStringField(serializers.Field):
+    """
+    Accepts a real list/dict (JSON requests) OR a JSON-encoded string
+    (multipart FormData, which can only send strings). Always stores
+    the parsed Python value, never the raw string.
+    """
+
+    def __init__(self, expected_type=list, **kwargs):
+        self.expected_type = expected_type
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data):
+        if isinstance(data, (bytes, bytearray)):
+            data = data.decode('utf-8')
+        # Unwrap up to twice, in case a value was double-encoded.
+        for _ in range(2):
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data) if data.strip() else self.expected_type()
+                except ValueError:
+                    raise serializers.ValidationError('Invalid JSON.')
+        if not isinstance(data, self.expected_type):
+            raise serializers.ValidationError(
+                f'Expected a {self.expected_type.__name__}.'
+            )
+        return data
+
+    def to_representation(self, value):
+        # Heals rows that were previously saved as a JSON string.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except ValueError:
+                return self.expected_type()
+        return value if value is not None else self.expected_type()
 
 
 class PostSerializer(serializers.ModelSerializer):
@@ -18,10 +57,9 @@ class PostSerializer(serializers.ModelSerializer):
     )
     readTime = serializers.CharField(source='read_time', required=False, allow_blank=True, max_length=20)
 
-    # ImageField (not SerializerMethodField) so uploads actually get written
-    # to the model. It also returns an absolute URL on read as long as
-    # 'request' is in the serializer context (see get_serializer_context
-    # in views.py), so no custom get_coverImage/get_socialShareImage needed.
+    tags = JSONStringField(required=False)
+    body = JSONStringField(required=False)
+
     coverImage = serializers.ImageField(source='cover_image', required=False, allow_null=True)
     coverImageAlt = serializers.CharField(source='cover_image_alt', required=False, allow_blank=True, max_length=200)
     coverImageCaption = serializers.CharField(
@@ -29,20 +67,11 @@ class PostSerializer(serializers.ModelSerializer):
     )
 
     socialShareImage = serializers.ImageField(source='social_share_image', required=False, allow_null=True)
-    # max_length values below mirror the model's column widths exactly —
-    # these fields are manually declared (not auto-generated from the
-    # model), so DRF does NOT inherit the model's max_length on its own.
-    # Without it here, an over-length value sails past serializer
-    # validation and blows up as a raw DB DataError instead of a clean
-    # 400 — which is exactly what happened with seo_title (varchar(220)).
     seoTitle = serializers.CharField(source='seo_title', required=False, allow_blank=True, max_length=220)
     metaDescription = serializers.CharField(
         source='meta_description', required=False, allow_blank=True, max_length=320
     )
-    seoKeywords = serializers.JSONField(source='seo_keywords', required=False)
-    # Plain CharField, not URLField — URL format is checked explicitly in
-    # validate_canonicalUrl below, after stripping, so any whitespace-only
-    # or genuinely-empty value is treated as blank no matter how it arrives.
+    seoKeywords = JSONStringField(source='seo_keywords', required=False)
     canonicalUrl = serializers.CharField(
         source='canonical_url', required=False, allow_blank=True, max_length=500
     )
@@ -161,6 +190,59 @@ class AnnouncementSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if attrs.get('link_label') and not attrs.get('link_url', self.instance.link_url if self.instance else ''):
             raise serializers.ValidationError({'linkUrl': 'Add a link URL, or clear the link text.'})
+
+        publish_at = attrs.get('publish_at', self.instance.publish_at if self.instance else None)
+        delete_at = attrs.get('delete_at', self.instance.delete_at if self.instance else None)
+        if attrs.get('delete_at') and attrs['delete_at'] <= timezone.now():
+            raise serializers.ValidationError({'deleteAt': 'Hide time must be in the future.'})
+        if publish_at and delete_at and delete_at <= publish_at:
+            raise serializers.ValidationError({'deleteAt': 'Hide time must be after the show time.'})
+        return attrs
+
+
+class PromoVideoSerializer(serializers.ModelSerializer):
+    """Camel-cased. Accepts multipart (video upload) or JSON (toggles)."""
+
+    MAX_VIDEO_BYTES = 50 * 1024 * 1024  # 50MB
+
+    video = serializers.FileField(required=False)
+    title = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    subtitle = serializers.CharField(required=False, allow_blank=True, max_length=80)
+    buttonLabel = serializers.CharField(source='button_label', required=False, allow_blank=True, max_length=40)
+    buttonUrl = serializers.CharField(source='button_url', required=False, allow_blank=True, max_length=500)
+    isActive = serializers.BooleanField(source='is_active', required=False)
+    publishAt = BlankToNullDateTimeField(source='publish_at', required=False, allow_null=True)
+    deleteAt = BlankToNullDateTimeField(source='delete_at', required=False, allow_null=True)
+    status = serializers.ReadOnlyField()  # hidden | scheduled | live | expired
+
+    class Meta:
+        model = PromoVideo
+        fields = [
+            'id', 'video', 'title', 'subtitle', 'buttonLabel', 'buttonUrl',
+            'isActive', 'publishAt', 'deleteAt', 'status', 'created_at', 'updated_at',
+        ]
+        read_only_fields = ['id', 'status', 'created_at', 'updated_at']
+
+    def validate_video(self, value):
+        content_type = getattr(value, 'content_type', '') or ''
+        if not content_type.startswith('video/'):
+            raise serializers.ValidationError('Only video files are allowed (mp4, webm, mov).')
+        if value.size > self.MAX_VIDEO_BYTES:
+            raise serializers.ValidationError('Video is too large (50MB max).')
+        return value
+
+    def validate_buttonUrl(self, value):
+        value = (value or '').strip()
+        if not value:
+            return ''
+        if value.startswith('/') and not value.startswith('//'):
+            return value
+        URLValidator(schemes=['http', 'https'], message='Enter a full URL (https://...) or a path like /contact.')(value)
+        return value
+
+    def validate(self, attrs):
+        if not self.instance and not attrs.get('video'):
+            raise serializers.ValidationError({'video': 'Upload a video.'})
 
         publish_at = attrs.get('publish_at', self.instance.publish_at if self.instance else None)
         delete_at = attrs.get('delete_at', self.instance.delete_at if self.instance else None)

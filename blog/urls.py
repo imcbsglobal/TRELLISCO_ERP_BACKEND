@@ -6,6 +6,7 @@ from . import views
 router = DefaultRouter()
 router.register('posts', views.PostViewSet, basename='post')
 router.register('announcements', views.AnnouncementViewSet, basename='announcement')
+router.register('promo-videos', views.PromoVideoViewSet, basename='promo-video')
 
 urlpatterns = [
     path('admin/login/', views.AdminLoginView.as_view(), name='blog-admin-login'),

@@ -7,11 +7,11 @@ from django.utils import timezone
 from rest_framework import status, viewsets, permissions
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import Announcement, Post
+from .models import Announcement, Post, PromoVideo
 from .scheduling import maybe_run_due_actions
 from .serializers import (
     AdminLoginSerializer,
@@ -19,6 +19,7 @@ from .serializers import (
     ContentUploadSerializer,
     PostListSerializer,
     PostSerializer,
+    PromoVideoSerializer,
 )
 
 
@@ -231,3 +232,49 @@ class ContentUploadView(APIView):
             {'url': url, 'type': 'video' if content_type.startswith('video/') else 'image'},
             status=status.HTTP_201_CREATED,
         )
+
+
+# ─────────────────────────────────────────────
+# PROMO VIDEO (floating homepage video card)
+# ─────────────────────────────────────────────
+class PromoVideoViewSet(viewsets.ModelViewSet):
+    """
+    /api/blog/promo-videos/           GET (staff: all, public: live now only), POST (staff, multipart)
+    /api/blog/promo-videos/<id>/      GET, PUT/PATCH, DELETE (staff)
+    /api/blog/promo-videos/active/    GET (public) — the promo to show, or null
+    """
+
+    queryset = PromoVideo.objects.all()
+    serializer_class = PromoVideoSerializer
+    permission_classes = [IsAdminOrReadOnly]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def get_queryset(self):
+        maybe_run_due_actions()
+
+        qs = super().get_queryset()
+        if self.request.user.is_authenticated and self.request.user.is_staff:
+            return qs
+        return qs.live()
+
+    def perform_update(self, serializer):
+        old_name = serializer.instance.video.name if serializer.instance.video else ''
+        promo = serializer.save()
+        # A new file replaced the old one -> remove the orphaned old file.
+        if old_name and old_name != promo.video.name:
+            promo.video.storage.delete(old_name)
+
+    def perform_destroy(self, instance):
+        name = instance.video.name if instance.video else ''
+        storage = instance.video.storage
+        instance.delete()
+        if name:
+            storage.delete(name)
+
+    @action(detail=False, methods=['get'], permission_classes=[permissions.AllowAny])
+    def active(self, request):
+        maybe_run_due_actions()
+        promo = PromoVideo.current()
+        if promo is None:
+            return Response(None)
+        return Response(self.get_serializer(promo).data)
