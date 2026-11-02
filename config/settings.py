@@ -33,7 +33,7 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 # (comma-separated), with the two local hosts always included as a safe
 # dev fallback so nothing changes for you locally.
 #
-# In production .env set e.g.:
+# In production .env set e.g.:///////
 #   ALLOWED_HOSTS=api.trellisco.com,trellisco.com
 _extra_hosts = [h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()]
 ALLOWED_HOSTS = [
